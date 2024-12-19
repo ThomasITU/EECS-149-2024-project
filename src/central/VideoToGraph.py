@@ -13,6 +13,10 @@ from SMrTa.MRTASolver import MRTASolver, Robot
 from SMrTa.MRTASolver.objects import Task
 
 
+MOVE_DURATION_MS = 13  # 13 ms to move 1 cm
+TURN_DURATION_MS = 50  # 50 ms to turn 45 degrees
+DIAGONAL_MULTIPLIER = 1.414  # sqrt(2) for diagonal movement
+
 def main():
     video = "img/video/test_red_close.mov"
     vg = VideoToGraph(75, 150, video)
@@ -223,12 +227,48 @@ class VideoToGraph:
             for j in range(solver_size):
                 if i == j:
                     solver_graph[i][j] = 0
+                    solver_graph[j][i] = 0
                 else:
                     try:
+                        
                         path = gr.safe_astar_path(graph, self.action_points[i], self.action_points[j], gr.heuristic)
+                        if path is None:
+                            continue
                         print(path)
-                        solver_graph[i][j] = gr.print_path_weights(graph, path)
-                        solver_graph[j][i] = gr.print_path_weights(graph, path)
+                        turning_cost = 0
+                        movement_cost = gr.print_path_weights(graph, path)*MOVE_DURATION_MS//self.block_size_cm
+                        # print(f"Movement cost: {movement_cost}")
+                        # Add turning costs to edges along path
+                        prev_direction = 0 # North
+                        for src, dest in zip(path[:-1], path[1:]):
+                            src_pos = graph.nodes[src].get(gr.GRID_POS)
+                            dest_pos = graph.nodes[dest].get(gr.GRID_POS)
+                            
+                            # Calculate direction vector
+                            dx = dest_pos[0] - src_pos[0]
+                            dy = dest_pos[1] - src_pos[1]
+                            
+                            if dx == 0:
+                                new_direction = 90 if dy > 0 else 270
+                            elif dy == 0:
+                                new_direction = 0 if dx > 0 else 180  
+                            elif dx > 0:
+                                new_direction = 45 if dy > 0 else 315
+                            else:
+                                new_direction = 135 if dy > 0 else 225
+                                
+                            angle_diff = abs(new_direction - prev_direction)
+                            if angle_diff > 180:
+                                angle_diff = 360 - angle_diff
+                                
+                            turning_cost += (angle_diff / 45) * TURN_DURATION_MS
+                                
+                            prev_direction = new_direction
+                        total_cost = movement_cost + turning_cost
+                        # print(f"Total cost: {total_cost}")
+                        solver_graph[i][j] = int(total_cost)
+                        solver_graph[j][i] = int(total_cost)
+                        # print(solver_graph[i][j])
                     except Exception as e:
                         print(e)
 
@@ -373,78 +413,83 @@ class VideoToGraph:
 
 
     def generate_point_to_point_movement_instructions(self, robot_schedules):
-            MOVE_DURATION = 200  # time to move between neighboring intersections
-            TURN_DURATION = 100  # calculate time to turn 90, 180, 270, 360 degrees
-            PICKUP_CMD = "P" # Do a spin
-            DROPOFF_CMD = "D" # Do a spin
-            FORWARD_CMD = "F"
-            TURN_LEFT_CMD = "L"
-            TURN_RIGHT_CMD = "R"
-            instructions_set = []
-            for robot_id, rschedule in enumerate(robot_schedules):
-                instructions = []
-                prev_direction = None
+        paths = []
+        PICKUP_CMD = "P" # Do a spin
+        DROPOFF_CMD = "D" # Do a spin
+        FORWARD_CMD = "F"
+        TURN_LEFT_CMD = "L"
+        TURN_RIGHT_CMD = "R"
+        WAIT_CMD = "W"
+        instructions_set = []
+        for i, rschedule in enumerate(robot_schedules):
+            robot_id = "robot 1" if i == 0 else "robot 2"
+            instructions = []
+            prev_direction = None
+            movement_start = False
+            # print(f"Robot {robot_id} paths:")
+            for i in range(len(rschedule)-1):
+                src = rschedule[i]['location']
+                dest = rschedule[i+1]['location']
 
-                print(f"Robot {robot_id} Instructions:")
-                for i in range(len(rschedule)-1):
-                    src = rschedule[i]['location']
-                    dest = rschedule[i+1]['location']
-                    next_action = rschedule[i+1]['action']
+                next_action = rschedule[i+1]['action']
+                if i > 0 and next_action != "WAIT":
+                    movement_start = True
+                # Compute full path between src and dest
+                path = gr.safe_astar_path(self.graph, self.graph.nodes[src].get(gr.GRID_POS), self.graph.nodes[dest].get(gr.GRID_POS), gr.heuristic)
+                print(path)
+                if self.paths.get(robot_id) is None:
+                    self.paths[robot_id] = []
+                self.paths[robot_id].append(path)
 
-                    # Compute full path between src and dest
-                    path = gr.safe_astar_path(self.graph, self.graph.nodes[src].get(gr.GRID_POS), self.graph.nodes[dest].get(gr.GRID_POS), gr.heuristic)
-                    print(path)
+                if movement_start == False and gr.print_path_weights(self.graph, path) < rschedule[i+1]['time'] - rschedule[i]['time']:
+                    instructions.append(f"{WAIT_CMD}:{int(rschedule[i+1]['time'] - rschedule[i]['time'] - gr.print_path_weights(self.graph, path))}")
+                # print(path)
 
-                    if len(path) > 1:
-                        step = 0
-                        while step < len(path)-1:
-                            direction = self.direction_to_turn(path[step], path[step + 1])
-                            if prev_direction is not None and prev_direction != direction:
-                                direction_angles = {
-                                    'N': 0,
-                                    'NE': 45,
-                                    'E': 90,
-                                    'SE': 135,
-                                    'S': 180,
-                                    'SW': 225,
-                                    'W': 270,
-                                    'NW': 315
-                                }
-                                angle = direction_angles[direction] - direction_angles[prev_direction]
-                                if angle > 180:
-                                    angle -= 360
-                                elif angle <= -180:
-                                    angle += 360
+                if len(path) > 1:
+                    step = 0
+                    while step < len(path)-1:
+                        direction = self.direction_to_turn(path[step], path[step + 1])
+                        if prev_direction is not None and prev_direction != direction:
+                            direction_angles = {
+                                'N': 0,
+                                'NE': 45,
+                                'E': 90,
+                                'SE': 135,
+                                'S': 180,
+                                'SW': 225,
+                                'W': 270,
+                                'NW': 315
+                            }
+                            angle = direction_angles[direction] - direction_angles[prev_direction]
+                            if angle > 180:
+                                angle = 360 - angle
 
-                                duration = int(abs(angle) / 45 * TURN_DURATION)
-                                if angle > 0:
-                                    instructions.append(f"{TURN_RIGHT_CMD}:{duration}")
-                                elif angle < 0:
-                                    instructions.append(f"{TURN_LEFT_CMD}:{duration}")
+                            angle = int(abs(angle))
+                            if angle > 0:
+                                instructions.append(f"{TURN_RIGHT_CMD}:{angle}")
+                            elif angle < 0:
+                                instructions.append(f"{TURN_LEFT_CMD}:{angle}")
 
-                            i = 1
-                            while (step + i < len(path)-1):
-                                if self.direction_to_turn(path[step + i], path[step + i + 1]) == direction:
-                                    i += 1
-                                else:
-                                    break
+                        j = 1
+                        while (step + j < len(path)-1):
+                            if self.direction_to_turn(path[step + j], path[step + j + 1]) == direction:
+                                j += 1
+                            else:
+                                break
 
-                            instructions.append(f"{FORWARD_CMD}:{MOVE_DURATION * i}")
-                            step += i
-                            prev_direction = direction
+                        instructions.append(f"{FORWARD_CMD}:{j}")
+                        step += j
+                        prev_direction = direction
 
-                    # After movement
-                    if next_action == "PICKUP":
-                        instructions.append(PICKUP_CMD)
-                    elif next_action == "DROPOFF":
-                        instructions.append(DROPOFF_CMD)
+                # After movement
+                if next_action == "PICKUP":
+                    instructions.append(PICKUP_CMD)
+                elif next_action == "DROPOFF":
+                    instructions.append(DROPOFF_CMD)                        
 
-                instructions_set.append(instructions)
-                instructions_str = ">".join(instructions)
-                print(f"Robot {robot_id} Instruction string:")
-                print(instructions_str)
-
-            return instructions_set
+            instructions_set.append(instructions)
+            print(f"Robot {robot_id} Instructions: {instructions}")
+        return instructions_set
 
     def convert_solution_to_schedules(self, solution):
         num_robots = len(solution['agt'])
@@ -512,7 +557,7 @@ class VideoToGraph:
             gr.set_node_positions(self.graph, self.matrix)
             self.update_robot_positions_from_trackers(image)
             self.detect_static_obstacles(image)
-            self.detect_qr_objects(image)
+            # self.detect_qr_objects(image)
             # self.detect_robots(image, self.robots_colors)
             self.compute_pixel_conversion()
             gr.adjust_graph_weights(self.graph, self.pixel_conversion)        
@@ -531,7 +576,7 @@ class VideoToGraph:
 
     def draw_qr_objects(self, overlay_image):
         for i, key in enumerate(self.tracked_qr_objects.keys()):
-            print(i, key)
+            # print(i, key)
             actor = self.tracked_qr_objects[key]
             pts = np.array(actor.get_bbox())
             poly_pts = pts.reshape((-1, 1, 2))
@@ -608,7 +653,7 @@ class VideoToGraph:
 
         # Update the trackers of each individual actor
         for actor_name in self.tracked_robots:
-            print("Updating actor", actor_name)
+            # print("Updating actor", actor_name)
             actor = self.tracked_robots[actor_name]
 
             if actor.update(image):
@@ -626,12 +671,12 @@ class VideoToGraph:
 
             # Track all robot actors 
             if actor.name in [uf.ROBOT_ONE, uf.ROBOT_TWO]:
-                print("Setting tracked QR robot objects to the respective value")
+                # print("Setting tracked QR robot objects to the respective value")
                 self.tracked_qr_objects[actor_name] = actor    
 
             # Track all action points 
             elif actor.name.startswith('action'):
-                print("Setting tracked QR action points to the respective value")
+                # print("Setting tracked QR action points to the respective value")
                 self.tracked_qr_objects[actor_name] = actor    
 
 
@@ -709,7 +754,8 @@ class VideoToGraph:
         
         if retval:
             for i, qr_code_info in enumerate(decoded_infos):
-                print("Received QR Code data of ", qr_code_info)
+                # print("Received QR Code data of ", qr_code_info)
+                pass 
                 # self.update_position(points[i], qr_code_info)
 
         for key in self.tracked_qr_objects.keys():
@@ -720,7 +766,8 @@ class VideoToGraph:
                     gr.update_graph_based_on_qr_code(self.graph, overlapping_nodes, self.overlapping_nodes)
                     self.overlapping_nodes = overlapping_nodes
             except:
-                print(f"Invalid QR code detected: {key}")
+                pass 
+                # print(f"Invalid QR code detected: {key}")
     
     def check_qr_code_overlap(self, graph, qr_code_points, proximity_threshold=25):
         # Get the bounding box of the QR code in graph space

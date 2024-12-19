@@ -6,6 +6,7 @@ class Robot:
         self.device_name = device_name
         self.characteristic_uuid = characteristic_uuid
         self.api_url = api_url
+        self.calibration = 1
 
     def init(self):
         """Asynchronous initialization."""
@@ -19,6 +20,9 @@ class Robot:
         self.reset_angle_data()
         self.reset_distance_data()
         print("Init complete")
+
+    def set_calibration(self, calibration_factor):
+        self.calibration = calibration_factor
 
     def add_robot(self):
         """Register a robot with the server."""
@@ -72,7 +76,8 @@ class Robot:
     def move(self, distance: float):
         """Send a move command."""
         print("MOOOOOOOOOVING")
-        return self.send_command(f"MOVE+{distance}")
+        fdist = distance * self.calibration
+        return self.send_command(f"MOVE+{fdist:.4f}")
 
     def turn(self, angle_in_degrees: float):
         """Send a turn command."""

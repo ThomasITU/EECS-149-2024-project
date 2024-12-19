@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 import requests
 
 load_dotenv()
-
+DIAGONAL_MULTIPLIER = 1.414
 def main():
     web_cam_close = "img/video/webcam_red_close.mov"
     web_cam_further_angle = "img/video/webcam_red_further_angle.mov"
@@ -130,11 +130,13 @@ def driver_code(video_input, robots):
                 #         move_robot = central_node.find_robot_by_name()
                 #         central_node.send_instruction(move_robot, current_instruction)
 
+                print("Running solution")
                 for name in central_node.vg.smt_dict:
                     rob = central_node.vg.smt_dict[name]
                     sol = rob['solution']
 
                     if len(sol):
+                        print("Running SMT solution")
                         move_robot = central_node.find_robot_by_name(rob['name'])[0]
                         central_node.send_instruction(move_robot, sol[0])
                         sol.pop(0)
@@ -347,31 +349,50 @@ class CentralNode:
         pass
 
     def send_instruction(self, robot, instruction, duration=None):
+        print("Sending instruction ", instruction)
         if instruction.startswith('F'):
-            robot.move(1)
+            robot.move(int(instruction.split(':')[-1]))
         elif instruction.startswith('L'):
-            robot.turn(-90)
+            robot.turn(-int(instruction.split(':')[-1]))
         elif instruction.startswith('R'):
-            robot.turn(-90)
-        # elif instruction == 'P' or  instruction == 'D':
-        #     self.motor_controller.spin()
-        print(f"sent to robot: {robot}, instruction: {instruction}")
-        return
+            robot.turn(int(instruction.split(':')[-1]))
+        elif instruction.startswith('P') or  instruction.startswith('D'):
+            robot.turn(360)
+            # self.motor_controller.spin()
+        elif instruction.startswith('W'):
+            pass # TO IMPLEMENT
+        else:
+            print("Invalid command") 
 
     def robot_calibration_and_sync(self, robots, eps = 1e-3):
         # ensure that movement is calibrated
         # move forward, orientation etc
+        calibration = {}
         for robot in robots:
             print("Calibrating", robot.device_name)
+            calibration_mapping  = self.vg.pixel_conversion.copy()
             
             # Move the robot forward 1 
-            initial_pos = self.vg.get_robot_positions(robot.device_name)
-            robot.move(1)
-            final_pos = self.vg.get_robot_positions(robot.device_name)
-
+            calibration = self.calibrate_robot(robot)
+            robot.set_calibration(calibration)
             print("DOOONE")
 
-            print("Initial and final pos", initial_pos, final_pos)
+    def calibrate_robot(self, robot):
+        initial_pos = self.vg.get_robot_positions(robot.device_name)
+        robot.move(1)
+        final_pos = self.vg.get_robot_positions(robot.device_name)
+        distance = gr.adjust_distance_based_on_correction_pixel(self.vg.graph, initial_pos, final_pos, self.vg.pixel_conversion)
+        
+
+        direction = gr.direction_pixel(initial_pos, final_pos, distance/3)
+        if direction == gr.DIAGONAL:
+            correction_factor = self.vg.block_size_cm*DIAGONAL_MULTIPLIER/distance
+            calibration =  correction_factor
+        else:
+            correction_factor = self.vg.block_size_cm/distance
+            calibration =  correction_factor
+
+        return calibration
 
     def tear_down(self):
         # Stop the thread and release resources 
